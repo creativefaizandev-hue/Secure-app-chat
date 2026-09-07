@@ -1,1 +1,12 @@
-sed -i 's/import android.content.Context/import android.content.Context\nimport android.content.SharedPreferences\nimport java.security.PrivateKey/' app/src/main/java/com/example/data/repository/SecureRepository.kt
+cat << 'PY' > patch.py
+with open("app/src/main/java/com/example/data/repository/SecureRepository.kt", "r") as f:
+    text = f.read()
+
+# Make sure we have firebase storage instance
+if "private val storage =" not in text:
+    text = text.replace("private val firestore = FirebaseFirestore.getInstance()", "private val firestore = FirebaseFirestore.getInstance()\n  private val storage = FirebaseStorage.getInstance()")
+
+with open("app/src/main/java/com/example/data/repository/SecureRepository.kt", "w") as f:
+    f.write(text)
+PY
+python3 patch.py

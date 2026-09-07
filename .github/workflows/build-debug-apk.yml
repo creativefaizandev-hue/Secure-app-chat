@@ -36,13 +36,16 @@ jobs:
           fi
           chmod +x ./gradlew
 
-      # google-services plugin is applied but google-services.json is not
-      # committed to this repo. missingGoogleServicesStrategy = WARN in
-      # app/build.gradle.kts means the build will not fail without it —
-      # Google Sign-In just won't be functional in this build.
-      - name: Check for google-services.json
+      # If the repository secret GOOGLE_SERVICES_JSON is configured, decode it.
+      # Otherwise fall back gracefully (missingGoogleServicesStrategy = WARN).
+      - name: Write google-services.json (if secret is configured)
+        env:
+          GOOGLE_SERVICES_SECRET: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
-          if [ ! -f "app/google-services.json" ]; then
+          if [ -n "$GOOGLE_SERVICES_SECRET" ]; then
+            echo "Writing app/google-services.json from secret..."
+            echo "$GOOGLE_SERVICES_SECRET" | base64 -d > app/google-services.json
+          elif [ ! -f "app/google-services.json" ]; then
             echo "::warning::app/google-services.json not found — Firebase/Google Sign-In will not work in this build, but the build itself will still succeed."
           fi
 

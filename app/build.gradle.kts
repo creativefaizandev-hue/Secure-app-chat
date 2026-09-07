@@ -90,6 +90,7 @@ dependencies {
   implementation(libs.androidx.compose.ui.graphics)
   implementation(libs.androidx.compose.ui.tooling.preview)
   implementation(libs.androidx.core.ktx)
+  implementation(libs.webrtc)
   implementation(libs.bcprov)
   // implementation(libs.androidx.datastore.preferences)
   implementation(libs.androidx.lifecycle.runtime.compose)
@@ -102,6 +103,8 @@ dependencies {
   implementation(platform(libs.firebase.bom))
   implementation(libs.firebase.auth)
   implementation(libs.firebase.firestore)
+  implementation(libs.firebase.storage)
+  implementation(libs.firebase.messaging)
   
   implementation(libs.androidx.credentials)
   implementation(libs.androidx.credentials.play.services)

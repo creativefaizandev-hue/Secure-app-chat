@@ -1,6 +1,10 @@
 package com.example.ui.screens
 
+import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -123,6 +127,30 @@ fun ChatDetailScreen(
   var showAttachmentDialog by remember { mutableStateOf(false) }
   var isRecordingVoiceNote by remember { mutableStateOf(false) }
   var recordingSeconds by remember { mutableIntStateOf(0) }
+
+  val photoPickerLauncher = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.PickVisualMedia()
+  ) { uri: Uri? ->
+    uri?.let { selectedUri ->
+      scope.launch {
+        try {
+          val bytes = context.contentResolver.openInputStream(selectedUri)?.use { it.readBytes() }
+          if (bytes != null) {
+            Toast.makeText(context, "Encrypting with AES-256...", Toast.LENGTH_SHORT).show()
+            repository.sendEncryptedAttachmentMessage(
+              conversationId = conversationId,
+              fileBytes = bytes,
+              fileName = "photo_${System.currentTimeMillis()}.jpg",
+              mimeType = "image/jpeg"
+            )
+            Toast.makeText(context, "Encrypted photo sent to Storage", Toast.LENGTH_SHORT).show()
+          }
+        } catch (e: Exception) {
+          Toast.makeText(context, "Attachment failed: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+      }
+    }
+  }
 
   val listState = rememberLazyListState()
 
@@ -500,7 +528,7 @@ fun ChatDetailScreen(
             )
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Photo attachment button
+            // Photo attachment button (Photo Picker)
             Card(
               colors = CardDefaults.cardColors(containerColor = CardSurfaceElevated),
               shape = RoundedCornerShape(10.dp),
@@ -508,14 +536,9 @@ fun ChatDetailScreen(
                 .fillMaxWidth()
                 .clickable {
                   showAttachmentDialog = false
-                  scope.launch {
-                    repository.sendEncryptedMediaMessage(
-                      conversationId = conversationId,
-                      type = MessageType.IMAGE,
-                      mediaUriOrData = "sample_encrypted_photo_payload",
-                      caption = "Encrypted Photographic Evidence"
-                    )
-                  }
+                  photoPickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                  )
                 }
             ) {
               Row(
@@ -525,8 +548,44 @@ fun ChatDetailScreen(
                 Icon(Icons.Default.Image, contentDescription = null, tint = EncryptionCyan)
                 Spacer(modifier = Modifier.width(12.dp))
                 Column {
-                  Text("Encrypted Photo", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
-                  Text("Client-side AES-256 encrypted", color = TextMutedDark, fontSize = 11.sp)
+                  Text("Choose Photo (Photo Picker)", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
+                  Text("Client-side AES-256 envelope encryption", color = TextMutedDark, fontSize = 11.sp)
+                }
+              }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Quick Demo Encrypted Photo
+            Card(
+              colors = CardDefaults.cardColors(containerColor = CardSurfaceElevated),
+              shape = RoundedCornerShape(10.dp),
+              modifier = Modifier
+                .fillMaxWidth()
+                .clickable {
+                  showAttachmentDialog = false
+                  scope.launch {
+                    val demoPhotoBytes = "Simulated encrypted camera sensor raw payload with biometric watermark".toByteArray(Charsets.UTF_8)
+                    Toast.makeText(context, "Encrypting & uploading to Firebase Storage...", Toast.LENGTH_SHORT).show()
+                    repository.sendEncryptedAttachmentMessage(
+                      conversationId = conversationId,
+                      fileBytes = demoPhotoBytes,
+                      fileName = "demo_secure_capture.jpg",
+                      mimeType = "image/jpeg"
+                    )
+                    Toast.makeText(context, "Encrypted attachment sent successfully", Toast.LENGTH_SHORT).show()
+                  }
+                }
+            ) {
+              Row(
+                modifier = Modifier.padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically
+              ) {
+                Icon(Icons.Default.Lock, contentDescription = null, tint = CyberEmerald)
+                Spacer(modifier = Modifier.width(12.dp))
+                Column {
+                  Text("Send Demo Encrypted Photo", color = TextPrimaryDark, fontWeight = FontWeight.SemiBold)
+                  Text("Direct Firebase Storage envelope upload", color = TextMutedDark, fontSize = 11.sp)
                 }
               }
             }
@@ -624,11 +683,15 @@ fun ChatMessageBubble(
             )
           }
           MessageType.IMAGE.name -> {
+            val parts = message.mediaBase64OrUri?.split("|")
+            val fileName = if (parts != null && parts.size >= 3) parts[2] else "encrypted_photo.jpg"
+            val isFromStorage = parts != null && parts.isNotEmpty() && parts[0].startsWith("http")
+
             Column {
               Box(
                 modifier = Modifier
                   .fillMaxWidth()
-                  .height(140.dp)
+                  .height(130.dp)
                   .clip(RoundedCornerShape(8.dp))
                   .background(
                     Brush.linearGradient(
@@ -646,25 +709,25 @@ fun ChatMessageBubble(
                   )
                   Spacer(modifier = Modifier.height(4.dp))
                   Text(
-                    text = "Encrypted Photo Sealed",
-                    fontSize = 11.sp,
-                    color = CyberEmerald,
+                    text = fileName,
+                    fontSize = 12.sp,
+                    color = TextPrimaryDark,
                     fontWeight = FontWeight.Bold
                   )
                   Text(
-                    text = "AES-256-GCM Hardware Cipher",
+                    text = if (isFromStorage) "Firebase Cloud Storage • AES-256 Envelope" else "AES-256-GCM Hardware Cipher",
                     fontSize = 9.sp,
-                    color = TextMutedDark,
+                    color = CyberEmerald,
                     fontFamily = FontFamily.Monospace
                   )
                 }
               }
               Spacer(modifier = Modifier.height(6.dp))
               Text(
-                text = decryptedText,
-                color = TextPrimaryDark,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium
+                text = "Key: ${message.encryptionAlgorithm} • Encrypted Envelope Sealed",
+                color = TextSecondaryDark,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace
               )
             }
           }
