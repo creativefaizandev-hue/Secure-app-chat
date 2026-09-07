@@ -36,7 +36,8 @@ jobs:
           fi
           chmod +x ./gradlew
 
-      # If the repository secret GOOGLE_SERVICES_JSON is configured, decode it.
+      # If the repository secret GOOGLE_SERVICES_JSON is configured, use it.
+      # Works whether you paste the raw JSON or a base64-encoded version.
       # Otherwise fall back gracefully (missingGoogleServicesStrategy = WARN).
       - name: Write google-services.json (if secret is configured)
         env:
@@ -44,9 +45,28 @@ jobs:
         run: |
           if [ -n "$GOOGLE_SERVICES_SECRET" ]; then
             echo "Writing app/google-services.json from secret..."
-            echo "$GOOGLE_SERVICES_SECRET" | base64 -d > app/google-services.json
+            if echo "$GOOGLE_SERVICES_SECRET" | grep -q '"project_info"'; then
+              echo "$GOOGLE_SERVICES_SECRET" > app/google-services.json
+            else
+              echo "$GOOGLE_SERVICES_SECRET" | base64 -d > app/google-services.json
+            fi
           elif [ ! -f "app/google-services.json" ]; then
             echo "::warning::app/google-services.json not found — Firebase/Google Sign-In will not work in this build, but the build itself will still succeed."
+          fi
+
+      # debug.keystore is intentionally gitignored (throwaway debug signing key).
+      # Generate it if it's not already present so validateSigningDebug has
+      # something to sign with.
+      - name: Ensure debug keystore exists
+        run: |
+          if [ ! -f "./debug.keystore" ]; then
+            echo "debug.keystore not found, generating..."
+            keytool -genkeypair \
+              -keystore debug.keystore \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
           fi
 
       - name: Set up Gradle cache
