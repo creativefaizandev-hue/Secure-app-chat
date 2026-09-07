@@ -32,7 +32,27 @@ android {
       keyPassword = System.getenv("KEY_PASSWORD")
     }
     create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
+      val debugKeystoreFile = file("${rootDir}/debug.keystore")
+      if (!debugKeystoreFile.exists()) {
+        // debug.keystore is gitignored on purpose (it's a throwaway signing key,
+        // not a secret worth committing). Generate it on first build so CI and
+        // fresh clones don't fail validateSigningDebug.
+        debugKeystoreFile.parentFile.mkdirs()
+        exec {
+          commandLine(
+            "keytool", "-genkeypair",
+            "-keystore", debugKeystoreFile.absolutePath,
+            "-storepass", "android",
+            "-keypass", "android",
+            "-alias", "androiddebugkey",
+            "-keyalg", "RSA",
+            "-keysize", "2048",
+            "-validity", "10000",
+            "-dname", "CN=Android Debug,O=Android,C=US"
+          )
+        }
+      }
+      storeFile = debugKeystoreFile
       storePassword = "android"
       keyAlias = "androiddebugkey"
       keyPassword = "android"
