@@ -1,0 +1,6 @@
+{
+  "name": "CipherChat",
+  "description": "End-to-end encrypted messaging and voice calls with Google OAuth, secure Room database, encrypted media and dark mode.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
