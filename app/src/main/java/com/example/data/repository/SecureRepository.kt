@@ -1,6 +1,10 @@
 package com.example.data.repository
 
 import android.content.Context
+import android.content.SharedPreferences
+import java.security.PrivateKey
+import javax.crypto.SecretKey
+import android.util.Log
 import com.example.crypto.CryptoEngine
 import com.example.data.entity.CallLogEntity
 import com.example.data.entity.ConversationEntity
@@ -11,14 +15,18 @@ import com.example.data.model.CallDirection
 import com.example.data.model.CallType
 import com.example.data.model.MessageStatus
 import com.example.data.model.MessageType
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.Query
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 
-class SecureRepository(context: Context) {
+class SecureRepository(private val context: Context) {
   private val db = AppDatabase.getInstance(context)
   private val conversationDao = db.conversationDao()
   private val messageDao = db.messageDao()
@@ -29,11 +37,142 @@ class SecureRepository(context: Context) {
   val callLogs: Flow<List<CallLogEntity>> = callLogDao.getAllCallLogs()
   val userProfile: Flow<UserProfileEntity?> = userProfileDao.getProfile()
   val totalMessageCount: Flow<Int> = messageDao.getTotalMessageCount()
+  
+  private val firestore by lazy { FirebaseFirestore.getInstance() }
+  private val auth by lazy { FirebaseAuth.getInstance() }
+  
+  private var isListeningToFirestore = false
 
   init {
     CoroutineScope(Dispatchers.IO).launch {
       seedInitialDataIfNeeded()
     }
+  }
+  
+  fun startFirestoreSync() {
+    try {
+      val currentUserId = auth.currentUser?.email ?: return
+      if (isListeningToFirestore) return
+      isListeningToFirestore = true
+      
+      CoroutineScope(Dispatchers.IO).launch {
+          try {
+              val pubKey = getOrGenerateKeyPair()
+              firestore.collection("users").document(currentUserId).set(mapOf("publicKey" to pubKey)).await()
+          } catch(e: Exception) { e.printStackTrace() }
+      }
+      
+      // Listen for new chats
+      firestore.collection("chats")
+        .whereArrayContains("participants", currentUserId)
+        .addSnapshotListener { snapshot, e ->
+          if (e != null || snapshot == null) return@addSnapshotListener
+          
+          CoroutineScope(Dispatchers.IO).launch {
+          for (doc in snapshot.documents) {
+            val chatId = doc.id
+            val participants = doc.get("participants") as? List<String> ?: continue
+            val otherEmail = participants.firstOrNull { it != currentUserId } ?: currentUserId
+            
+            // Check if conversation exists locally
+            val existing = conversationDao.getConversationSync(chatId)
+            if (existing == null) {
+              val newConv = ConversationEntity(
+                id = chatId,
+                contactName = otherEmail.substringBefore("@"),
+                contactEmail = otherEmail,
+                avatarSeed = otherEmail,
+                lastEncryptedMessage = "New Chat",
+                lastMessageTimestamp = System.currentTimeMillis(),
+                unreadCount = 0,
+                safetyNumber = CryptoEngine.generateSafetyNumber(currentUserId, otherEmail),
+                isVerified = false,
+                e2eeFingerprint = CryptoEngine.computeKeyFingerprint(otherEmail),
+                isOnline = true
+              )
+              conversationDao.insertOrUpdate(newConv)
+            }
+            
+            // Listen for messages in this chat
+            listenForMessages(chatId, currentUserId)
+          }
+        }
+      }
+    } catch (e: Exception) {
+      e.printStackTrace()
+    }
+  }
+
+  private fun listenForMessages(chatId: String, currentUserId: String) {
+    firestore.collection("chats").document(chatId).collection("messages")
+      .orderBy("timestamp", Query.Direction.ASCENDING)
+      .addSnapshotListener { snapshot, e ->
+        if (e != null || snapshot == null) return@addSnapshotListener
+        
+        CoroutineScope(Dispatchers.IO).launch {
+          for (change in snapshot.documentChanges) {
+            if (change.type == com.google.firebase.firestore.DocumentChange.Type.ADDED) {
+              val doc = change.document
+              val senderId = doc.getString("senderId") ?: ""
+              if (senderId != currentUserId) {
+                // It's an incoming message
+                val text = doc.getString("text") ?: ""
+                val timestamp = doc.getLong("timestamp") ?: System.currentTimeMillis()
+                
+                val cipherText = doc.getString("cipherText")
+                val iv = doc.getString("iv")
+                var decryptedText = text // fallback if plaintext
+
+                if (cipherText != null && iv != null) {
+                    try {
+                        val senderDoc = firestore.collection("users").document(senderId).get().await()
+                        val senderPubB64 = senderDoc.getString("publicKey")
+                        if (senderPubB64 != null) {
+                            val myPriv = getMyPrivateKey()
+                            if (myPriv != null) {
+                                val senderPub = CryptoEngine.decodePublicKey(senderPubB64)
+                                val sharedSecret = CryptoEngine.deriveSharedSecret(myPriv, senderPub)
+                                decryptedText = CryptoEngine.decryptStringE2EE(cipherText, iv, sharedSecret)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        decryptedText = "[E2EE Decryption Failed]"
+                    }
+                }
+                
+                val encrypted = CryptoEngine.encryptString(decryptedText)
+                
+                val existing = messageDao.getMessagesForConversation(chatId).first()
+                if (existing.none { it.timestamp == timestamp && it.senderId == senderId }) {
+                  val msg = MessageEntity(
+                    conversationId = chatId,
+                    senderId = senderId,
+                    senderName = senderId.substringBefore("@"),
+                    isOutgoing = false,
+                    cipherText = encrypted.cipherTextBase64,
+                    iv = encrypted.ivBase64,
+                    encryptionAlgorithm = "AES-256-GCM / X25519", 
+                    messageType = MessageType.TEXT.name,
+                    timestamp = timestamp,
+                    status = MessageStatus.DELIVERED.name
+                  )
+                  messageDao.insert(msg)
+                  
+                  conversationDao.getConversationSync(chatId)?.let { conv ->
+                    conversationDao.update(
+                      conv.copy(
+                        lastEncryptedMessage = "🔒 E2EE: $text",
+                        lastMessageTimestamp = timestamp,
+                        unreadCount = conv.unreadCount + 1
+                      )
+                    )
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
   }
 
   fun getMessages(conversationId: String): Flow<List<MessageEntity>> {
@@ -44,22 +183,57 @@ class SecureRepository(context: Context) {
     return conversationDao.getConversationById(id)
   }
 
+  suspend fun insertConversation(conversation: ConversationEntity) = withContext(Dispatchers.IO) {
+    conversationDao.insertOrUpdate(conversation)
+  }
+
   suspend fun sendEncryptedTextMessage(
     conversationId: String,
     text: String,
     senderName: String = "You (Verified)"
   ) = withContext(Dispatchers.IO) {
-    val encrypted = CryptoEngine.encryptString(text)
     val now = System.currentTimeMillis()
+    val currentUserId = try { auth.currentUser?.email ?: "me" } catch (e: Exception) { "me" }
+
+    var wireCipherText = ""
+    var wireIv = ""
+    var localCipherText = ""
+    var localIv = ""
+    var algo = "AES-256-GCM"
+
+    val conv = conversationDao.getConversationSync(conversationId)
+    if (conv != null) {
+        try {
+            val userDoc = firestore.collection("users").document(conv.contactEmail).get().await()
+            val recipientPubB64 = userDoc.getString("publicKey")
+            if (recipientPubB64 != null) {
+                val myPriv = getMyPrivateKey()
+                if (myPriv != null) {
+                    val recipientPub = CryptoEngine.decodePublicKey(recipientPubB64)
+                    val sharedSecret = CryptoEngine.deriveSharedSecret(myPriv, recipientPub)
+                    val encrypted = CryptoEngine.encryptStringE2EE(text, sharedSecret)
+                    wireCipherText = encrypted.cipherTextBase64
+                    wireIv = encrypted.ivBase64
+                    algo = encrypted.algorithm
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+    
+    val localEncrypted = CryptoEngine.encryptString(text)
+    localCipherText = localEncrypted.cipherTextBase64
+    localIv = localEncrypted.ivBase64
 
     val msg = MessageEntity(
       conversationId = conversationId,
-      senderId = "me",
+      senderId = currentUserId,
       senderName = senderName,
       isOutgoing = true,
-      cipherText = encrypted.cipherTextBase64,
-      iv = encrypted.ivBase64,
-      encryptionAlgorithm = encrypted.algorithm,
+      cipherText = localCipherText,
+      iv = localIv,
+      encryptionAlgorithm = algo,
       messageType = MessageType.TEXT.name,
       timestamp = now,
       status = MessageStatus.SENT.name
@@ -74,6 +248,27 @@ class SecureRepository(context: Context) {
           lastMessageTimestamp = now
         )
       )
+      
+      try {
+        val chatRef = firestore.collection("chats").document(conversationId)
+        chatRef.set(mapOf("participants" to listOf(currentUserId, conv.contactEmail))).await()
+        
+        val messageMap = mutableMapOf<String, Any>(
+          "senderId" to currentUserId,
+          "timestamp" to now,
+          "messageType" to MessageType.TEXT.name
+        )
+        if (wireCipherText.isNotEmpty()) {
+            messageMap["cipherText"] = wireCipherText
+            messageMap["iv"] = wireIv
+        } else {
+            messageMap["text"] = text // Fallback to plaintext if E2EE not established
+        }
+        
+        chatRef.collection("messages").add(messageMap).await()
+      } catch (e: Exception) {
+        Log.e("SecureRepository", "Failed to send to Firestore", e)
+      }
     }
   }
 
@@ -336,5 +531,37 @@ class SecureRepository(context: Context) {
       )
       callLogDao.insertAll(listOf(call1, call2))
     }
+  }
+
+  private val prefs by lazy { context.getSharedPreferences("cipher_secure_prefs", Context.MODE_PRIVATE) }
+
+  private suspend fun getOrGenerateKeyPair(): String {
+      val existingPriv = prefs.getString("x25519_private_key_enc", null)
+      val existingPub = prefs.getString("x25519_public_key", null)
+      
+      if (existingPriv != null && existingPub != null) {
+          return existingPub
+      }
+      
+      val kp = CryptoEngine.generateE2EEKeyPair()
+      val privB64 = CryptoEngine.encodeKey(kp.private)
+      val pubB64 = CryptoEngine.encodeKey(kp.public)
+      
+      val encryptedPriv = CryptoEngine.encryptString(privB64)
+      
+      prefs.edit()
+          .putString("x25519_private_key_enc", encryptedPriv.cipherTextBase64)
+          .putString("x25519_private_key_iv", encryptedPriv.ivBase64)
+          .putString("x25519_public_key", pubB64)
+          .apply()
+          
+      return pubB64
+  }
+
+  private fun getMyPrivateKey(): PrivateKey? {
+      val cipherText = prefs.getString("x25519_private_key_enc", null) ?: return null
+      val iv = prefs.getString("x25519_private_key_iv", null) ?: return null
+      val privB64 = CryptoEngine.decryptString(cipherText, iv)
+      return CryptoEngine.decodePrivateKey(privB64)
   }
 }

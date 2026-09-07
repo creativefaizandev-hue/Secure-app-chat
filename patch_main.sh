@@ -1,0 +1,1 @@
+sed -i '/val callManager = remember { VoiceCallManager(context, repository) }/a \        androidx.compose.runtime.LaunchedEffect(Unit) {\n            callManager.listenForIncomingCalls()\n        }' app/src/main/java/com/example/MainActivity.kt

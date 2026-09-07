@@ -403,6 +403,7 @@ fun ChatsTab(
                 isOnline = true
               )
               scope.launch {
+                repository.insertConversation(newConv)
                 repository.sendEncryptedTextMessage(contactId, "End-to-End Encrypted Session Initialized.")
                 Toast.makeText(context, "Encrypted channel established with $newName", Toast.LENGTH_SHORT).show()
               }
@@ -720,7 +721,7 @@ fun VaultTab(repository: SecureRepository) {
       color = TextPrimaryDark
     )
     Text(
-      text = "Zero-Hacking Guarantee • Hardware Cryptographic Architecture",
+      text = "End-to-End Cryptographic Architecture",
       fontSize = 11.sp,
       color = CyberEmerald
     )
@@ -753,14 +754,14 @@ fun VaultTab(repository: SecureRepository) {
             Spacer(modifier = Modifier.width(14.dp))
             Column {
               Text(
-                text = "ZERO-HACKING GUARANTEE ACTIVE",
+                text = "END-TO-END ENCRYPTION ACTIVE",
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
                 color = CyberEmerald,
                 letterSpacing = 0.8.sp
               )
               Text(
-                text = "Keys are generated and sealed within device hardware. Neither network eavesdroppers nor server administrators can access voice audio, texts, images, or video payloads.",
+                text = "Messages are encrypted locally before being sent over the network. Only intended recipients can decrypt them.",
                 fontSize = 11.sp,
                 color = TextPrimaryDark,
                 lineHeight = 16.sp
@@ -790,13 +791,13 @@ fun VaultTab(repository: SecureRepository) {
         SecurityStatusRow("Key Exchange Protocol", "ECDH Curve25519 + HKDF-SHA256", EncryptionCyan, Icons.Default.SwapHoriz)
       }
       item {
-        SecurityStatusRow("Local Room Database", "Encrypted At Rest (Zero Leakage)", CyberEmerald, Icons.Default.Security)
+        SecurityStatusRow("Local Database", audit.localDbEncryptionStatus, CyberEmerald, Icons.Default.Security)
       }
       item {
         SecurityStatusRow("Total Encrypted Payloads", "$totalMessages Encrypted Records", ShieldViolet, Icons.Default.CheckCircle)
       }
       item {
-        SecurityStatusRow("Voice Streaming Security", "SRTP Authenticated Frame Packets", CyberEmerald, Icons.Default.Phone)
+        SecurityStatusRow("Voice Streaming Security", "WebRTC Datachannel SRTP", CyberEmerald, Icons.Default.Phone)
       }
 
       item {
@@ -986,7 +987,7 @@ fun AccountTab(
     Button(
       onClick = {
         scope.launch {
-          val res = authManager.signInWithGoogle()
+          val res = authManager.signInWithGoogle(com.example.BuildConfig.GOOGLE_WEB_CLIENT_ID)
           Toast.makeText(context, "Google OAuth: Signed in as ${res.getOrNull()?.email ?: "User"}", Toast.LENGTH_SHORT).show()
         }
       },

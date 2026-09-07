@@ -39,6 +39,9 @@ class MainActivity : ComponentActivity() {
         val repository = remember { SecureRepository(context) }
         val authManager = remember { GoogleAuthManager(context, repository) }
         val callManager = remember { VoiceCallManager(context, repository) }
+        androidx.compose.runtime.LaunchedEffect(Unit) {
+            callManager.listenForIncomingCalls()
+        }
 
         val callState by callManager.callState.collectAsState()
         var activeConversationId by remember { mutableStateOf<String?>(null) }
