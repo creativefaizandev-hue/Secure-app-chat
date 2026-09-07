@@ -32,30 +32,19 @@ android {
       keyPassword = System.getenv("KEY_PASSWORD")
     }
     create("debugConfig") {
-      val debugKeystoreFile = file("${rootDir}/debug.keystore")
-      if (!debugKeystoreFile.exists()) {
-        // debug.keystore is gitignored on purpose (it's a throwaway signing key,
-        // not a secret worth committing). Generate it on first build so CI and
-        // fresh clones don't fail validateSigningDebug.
-        debugKeystoreFile.parentFile.mkdirs()
-        val process = ProcessBuilder(
-          "keytool", "-genkeypair",
-          "-keystore", debugKeystoreFile.absolutePath,
-          "-storepass", "android",
-          "-keypass", "android",
-          "-alias", "androiddebugkey",
-          "-keyalg", "RSA",
-          "-keysize", "2048",
-          "-validity", "10000",
-          "-dname", "CN=Android Debug,O=Android,C=US"
-        ).redirectErrorStream(true).start()
-        val output = process.inputStream.bufferedReader().readText()
-        val exitCode = process.waitFor()
-        if (exitCode != 0) {
-          throw GradleException("Failed to generate debug.keystore (exit $exitCode):\n$output")
-        }
-      }
-      storeFile = debugKeystoreFile
+      // debug.keystore is intentionally gitignored (throwaway debug signing key).
+      // It must exist BEFORE Gradle runs — Gradle 9's configuration cache does
+      // not allow starting external processes (like keytool) at configuration
+      // time. Generate it in your shell / CI step before calling ./gradlew:
+      //
+      //   keytool -genkeypair -keystore debug.keystore \
+      //     -storepass android -keypass android -alias androiddebugkey \
+      //     -keyalg RSA -keysize 2048 -validity 10000 \
+      //     -dname "CN=Android Debug,O=Android,C=US"
+      //
+      // (The GitHub Actions workflow already does this in its
+      // "Ensure debug keystore exists" step, before "Build debug APK" runs.)
+      storeFile = file("${rootDir}/debug.keystore")
       storePassword = "android"
       keyAlias = "androiddebugkey"
       keyPassword = "android"
