@@ -26,9 +26,8 @@ class PushNotificationService : FirebaseMessagingService() {
 
         fun updateTokenInFirestore(token: String) {
             val user = FirebaseAuth.getInstance().currentUser ?: return
-            val email = user.email ?: return
-            FirebaseFirestore.getInstance().collection("users").document(email)
-                .update("fcmToken", token)
+            FirebaseFirestore.getInstance().collection("userNotificationTokens").document(user.uid)
+                .set(mapOf("fcmToken" to token), com.google.firebase.firestore.SetOptions.merge())
                 .addOnSuccessListener {
                     Log.d(TAG, "FCM Token updated successfully in Firestore")
                 }

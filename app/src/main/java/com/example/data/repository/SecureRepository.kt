@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import java.security.PrivateKey
 import javax.crypto.SecretKey
 import android.util.Log
+import com.example.notifications.NotificationClient
 import com.example.crypto.CryptoEngine
 import com.example.data.entity.CallLogEntity
 import com.example.data.entity.ConversationEntity
@@ -26,6 +27,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import com.google.firebase.firestore.DocumentReference
 
 class SecureRepository(private val context: Context) {
   private val db = AppDatabase.getInstance(context)
@@ -51,24 +53,129 @@ class SecureRepository(private val context: Context) {
     }
   }
   
+  sealed class SendMessageResult {
+    data object Success : SendMessageResult()
+    data class Failure(val reason: String) : SendMessageResult()
+  }
+
+  suspend fun getUsername(uid: String): String? = withContext(Dispatchers.IO) {
+    try { firestore.collection("users").document(uid).get().await().getString("username") } catch (_: Exception) { null }
+  }
+
+  private fun normalizeUsername(value: String): String = value.trim()
+
+  private fun isValidUsername(value: String): Boolean = value.matches(Regex("^[A-Za-z0-9_]{3,20}$"))
+
+  suspend fun setUsername(usernameInput: String): Result<String> = withContext(Dispatchers.IO) {
+    val uid = auth.currentUser?.uid ?: return@withContext Result.failure(Exception("Not signed in"))
+    val username = normalizeUsername(usernameInput)
+    if (!isValidUsername(username)) return@withContext Result.failure(Exception("Username must be 3-20 characters using letters, numbers, or underscore"))
+    try {
+      firestore.runTransaction { transaction ->
+        val ref = firestore.collection("usernames").document(username)
+        if (transaction.get(ref).exists()) throw IllegalStateException("Username is already taken")
+        transaction.set(ref, mapOf("uid" to uid))
+        transaction.set(
+          firestore.collection("users").document(uid),
+          mapOf("uid" to uid, "username" to username),
+          com.google.firebase.firestore.SetOptions.merge()
+        )
+        null
+      }.await()
+      Result.success(username)
+    } catch (e: Exception) {
+      Result.failure(e)
+    }
+  }
+
+  suspend fun changeUsername(usernameInput: String): Result<String> = withContext(Dispatchers.IO) {
+    val uid = auth.currentUser?.uid ?: return@withContext Result.failure(Exception("Not signed in"))
+    val username = normalizeUsername(usernameInput)
+    if (!isValidUsername(username)) return@withContext Result.failure(Exception("Username must be 3-20 characters using letters, numbers, or underscore"))
+    try {
+      firestore.runTransaction { transaction ->
+        val userRef = firestore.collection("users").document(uid)
+        val userSnap = transaction.get(userRef)
+        val oldUsername = userSnap.getString("username")
+        val newRef = firestore.collection("usernames").document(username)
+        val newSnap = transaction.get(newRef)
+        if (newSnap.exists() && newSnap.getString("uid") != uid) throw IllegalStateException("Username is already taken")
+        if (oldUsername == username) return@runTransaction null
+        oldUsername?.let { transaction.delete(firestore.collection("usernames").document(it)) }
+        transaction.set(newRef, mapOf("uid" to uid))
+        transaction.set(
+          userRef,
+          mapOf("uid" to uid, "username" to username),
+          com.google.firebase.firestore.SetOptions.merge()
+        )
+        null
+      }.await()
+      Result.success(username)
+    } catch (e: Exception) {
+      Result.failure(e)
+    }
+  }
+
+  suspend fun createConversationWithUsername(usernameInput: String, displayName: String): Result<ConversationEntity> = withContext(Dispatchers.IO) {
+    val currentUid = auth.currentUser?.uid ?: return@withContext Result.failure(Exception("Not signed in"))
+    val username = normalizeUsername(usernameInput)
+    if (!isValidUsername(username)) return@withContext Result.failure(Exception("Username must be 3-20 characters using letters, numbers, or underscore"))
+    try {
+      val usernameDoc = firestore.collection("usernames").document(username).get().await()
+      val contactUid = usernameDoc.getString("uid") ?: return@withContext Result.failure(Exception("Username not found"))
+      if (contactUid == currentUid) return@withContext Result.failure(Exception("You cannot add yourself"))
+      val userDoc = firestore.collection("users").document(contactUid).get().await()
+      val contactName = userDoc.getString("displayName") ?: username
+      val fingerprint = userDoc.getString("publicKey")?.let(CryptoEngine::computeKeyFingerprint) ?: CryptoEngine.computeKeyFingerprint(contactUid)
+      val chatId = listOf(currentUid, contactUid).sorted().joinToString("_")
+      val conversation = ConversationEntity(
+        id = chatId, contactName = contactName, contactUid = contactUid, contactUsername = username,
+        avatarSeed = username, lastEncryptedMessage = "🔒 E2EE Session Ready", lastMessageTimestamp = System.currentTimeMillis(),
+        unreadCount = 0, safetyNumber = CryptoEngine.generateSafetyNumber(currentUid, contactUid), isVerified = false,
+        e2eeFingerprint = fingerprint, isOnline = true
+      )
+      insertConversation(conversation)
+      firestore.collection("chats").document(chatId).set(mapOf("participants" to listOf(currentUid, contactUid))).await()
+      Result.success(conversation)
+    } catch (e: Exception) { Result.failure(e) }
+  }
+
+  private suspend fun resolveRecipientSharedSecret(recipientUid: String): SecretKey? {
+    return try {
+      val recipientPubB64 = firestore.collection("users").document(recipientUid).get().await().getString("publicKey") ?: return null
+      val myPriv = getMyPrivateKey() ?: return null
+      CryptoEngine.deriveSharedSecret(myPriv, CryptoEngine.decodePublicKey(recipientPubB64))
+    } catch (_: Exception) { null }
+  }
+
   fun startFirestoreSync() {
     try {
-      val currentUserId = auth.currentUser?.email ?: return
+      val currentUserId = auth.currentUser?.uid ?: return
       if (isListeningToFirestore) return
       isListeningToFirestore = true
       
       CoroutineScope(Dispatchers.IO).launch {
           try {
               val pubKey = getOrGenerateKeyPair()
-              val userMap = mutableMapOf<String, Any>("publicKey" to pubKey)
+              val firebaseUser = auth.currentUser
+              firestore.collection("users").document(currentUserId)
+                  .set(
+                    mapOf(
+                      "uid" to currentUserId,
+                      "username" to getUsername(currentUserId),
+                      "displayName" to (firebaseUser?.displayName ?: "Firebase User"),
+                      "photoUrl" to firebaseUser?.photoUrl?.toString(),
+                      "publicKey" to pubKey
+                    ).filterValues { it != null },
+                    com.google.firebase.firestore.SetOptions.merge()
+                  ).await()
               try {
                   val token = com.google.firebase.messaging.FirebaseMessaging.getInstance().token.await()
-                  userMap["fcmToken"] = token
-              } catch (e: Exception) {
-                  // Optional FCM token fallback
+                  firestore.collection("userNotificationTokens").document(currentUserId)
+                      .set(mapOf("fcmToken" to token), com.google.firebase.firestore.SetOptions.merge()).await()
+              } catch (_: Exception) {
+                  // Token sync is best effort; onNewToken retries later.
               }
-              firestore.collection("users").document(currentUserId)
-                  .set(userMap, com.google.firebase.firestore.SetOptions.merge()).await()
           } catch(e: Exception) { e.printStackTrace() }
       }
       
@@ -82,22 +189,25 @@ class SecureRepository(private val context: Context) {
           for (doc in snapshot.documents) {
             val chatId = doc.id
             val participants = doc.get("participants") as? List<String> ?: continue
-            val otherEmail = participants.firstOrNull { it != currentUserId } ?: currentUserId
+            val otherUid = participants.firstOrNull { it != currentUserId } ?: currentUserId
+            val otherUserDoc = try { firestore.collection("users").document(otherUid).get().await() } catch (_: Exception) { null }
+            val otherUsername = otherUserDoc?.getString("username") ?: otherUid.take(8)
             
             // Check if conversation exists locally
             val existing = conversationDao.getConversationSync(chatId)
             if (existing == null) {
               val newConv = ConversationEntity(
                 id = chatId,
-                contactName = otherEmail.substringBefore("@"),
-                contactEmail = otherEmail,
-                avatarSeed = otherEmail,
+                contactName = otherUserDoc?.getString("displayName") ?: otherUsername,
+                contactUid = otherUid,
+                contactUsername = otherUsername,
+                avatarSeed = otherUsername,
                 lastEncryptedMessage = "New Chat",
                 lastMessageTimestamp = System.currentTimeMillis(),
                 unreadCount = 0,
-                safetyNumber = CryptoEngine.generateSafetyNumber(currentUserId, otherEmail),
+                safetyNumber = CryptoEngine.generateSafetyNumber(currentUserId, otherUid),
                 isVerified = false,
-                e2eeFingerprint = CryptoEngine.computeKeyFingerprint(otherEmail),
+                e2eeFingerprint = CryptoEngine.computeKeyFingerprint(otherUid),
                 isOnline = true
               )
               conversationDao.insertOrUpdate(newConv)
@@ -125,31 +235,28 @@ class SecureRepository(private val context: Context) {
               val doc = change.document
               val senderId = doc.getString("senderId") ?: ""
               if (senderId != currentUserId) {
-                // It's an incoming message
-                val text = doc.getString("text") ?: ""
+                // Incoming messages must be encrypted at rest on the server. Never accept the
+                // legacy plaintext `text` field and never synthesize a message from it.
                 val timestamp = doc.getLong("timestamp") ?: System.currentTimeMillis()
-                
-                val cipherText = doc.getString("cipherText")
-                val iv = doc.getString("iv")
-                var decryptedText = text // fallback if plaintext
+                val cipherText = doc.getString("cipherText") ?: return@launch
+                val iv = doc.getString("iv") ?: return@launch
 
-                if (cipherText != null && iv != null) {
-                    try {
-                        val senderDoc = firestore.collection("users").document(senderId).get().await()
-                        val senderPubB64 = senderDoc.getString("publicKey")
-                        if (senderPubB64 != null) {
-                            val myPriv = getMyPrivateKey()
-                            if (myPriv != null) {
-                                val senderPub = CryptoEngine.decodePublicKey(senderPubB64)
-                                val sharedSecret = CryptoEngine.deriveSharedSecret(myPriv, senderPub)
-                                decryptedText = CryptoEngine.decryptStringE2EE(cipherText, iv, sharedSecret)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        decryptedText = "[E2EE Decryption Failed]"
+                val decryptedText = try {
+                    val senderDoc = firestore.collection("users").document(senderId).get().await()
+                    val senderPubB64 = senderDoc.getString("publicKey")
+                    val myPriv = getMyPrivateKey()
+                    if (senderPubB64.isNullOrBlank() || myPriv == null) {
+                        "[Encrypted message — waiting for key sync]"
+                    } else {
+                        val senderPub = CryptoEngine.decodePublicKey(senderPubB64)
+                        val sharedSecret = CryptoEngine.deriveSharedSecret(myPriv, senderPub)
+                        CryptoEngine.decryptStringE2EE(cipherText, iv, sharedSecret)
                     }
+                } catch (e: Exception) {
+                    Log.w("SecureRepository", "Could not decrypt incoming E2EE message", e)
+                    "[Encrypted message — decryption unavailable]"
                 }
-                
+
                 val encrypted = CryptoEngine.encryptString(decryptedText)
                 
                 val existing = messageDao.getMessagesForConversation(chatId).first()
@@ -204,113 +311,48 @@ class SecureRepository(private val context: Context) {
     fileName: String,
     mimeType: String,
     senderName: String = "You (Verified)"
-  ) = withContext(Dispatchers.IO) {
+  ): SendMessageResult = withContext(Dispatchers.IO) {
+    val currentUserId = auth.currentUser?.uid ?: return@withContext SendMessageResult.Failure("Not signed in")
+    val conv = conversationDao.getConversationSync(conversationId)
+      ?: return@withContext SendMessageResult.Failure("Conversation not found")
+    val e2ee = resolveRecipientSharedSecret(conv.contactUid)
+      ?: return@withContext SendMessageResult.Failure("can't send yet — waiting for the other person's key to sync")
+
     val now = System.currentTimeMillis()
-    val currentUserId = try { auth.currentUser?.email ?: "me" } catch (e: Exception) { "me" }
-    
-    // 1. Envelope Encryption: Generate a random AES key per file
     val fileAesKey = CryptoEngine.generateRandomAesKey()
-    
-    // 2. Encrypt the file bytes with this key locally
     val encryptedFile = CryptoEngine.encryptFile(fileBytes, fileAesKey)
     val cipherTextBytes = android.util.Base64.decode(encryptedFile.cipherTextBase64, android.util.Base64.NO_WRAP)
-    
-    // 3. Upload the encrypted blob to Firebase Storage
+
     val storageRef = storage.reference.child("attachments/$conversationId/${java.util.UUID.randomUUID()}")
     try {
-        storageRef.putBytes(cipherTextBytes).await()
-    } catch(e: Exception) {
-        e.printStackTrace()
-        return@withContext
-    }
-    
-    val downloadUrl = try { storageRef.downloadUrl.await().toString() } catch(e:Exception){ "" }
-    
-    // 4. Encrypt the fileAesKey with the recipient's X25519 public key (using ECDH)
-    var wireCipherText = ""
-    var wireIv = ""
-    var localCipherText = ""
-    var localIv = ""
-    var algo = "AES-256-GCM / X25519"
-    var encryptedKeyB64 = ""
+      storageRef.putBytes(cipherTextBytes).await()
+      val downloadUrl = storageRef.downloadUrl.await().toString()
+      val fileAesKeyB64 = android.util.Base64.encodeToString(fileAesKey, android.util.Base64.NO_WRAP)
+      val encryptedKeyData = CryptoEngine.encryptStringE2EE(fileAesKeyB64, e2ee)
+      val mediaPayload = "$downloadUrl|${encryptedFile.ivBase64}|$fileName|$mimeType"
+      val localEncryptedKeyData = CryptoEngine.encryptString(fileAesKeyB64)
 
-    val fileAesKeyB64 = android.util.Base64.encodeToString(fileAesKey, android.util.Base64.NO_WRAP)
-
-    val conv = conversationDao.getConversationSync(conversationId)
-    if (conv != null) {
-        try {
-            val userDoc = firestore.collection("users").document(conv.contactEmail).get().await()
-            val recipientPubB64 = userDoc.getString("publicKey")
-            if (recipientPubB64 != null) {
-                val myPriv = getMyPrivateKey()
-                if (myPriv != null) {
-                    val recipientPub = CryptoEngine.decodePublicKey(recipientPubB64)
-                    val sharedSecret = CryptoEngine.deriveSharedSecret(myPriv, recipientPub)
-                    
-                    // We encrypt the file's AES key using the shared secret
-                    val encryptedKeyData = CryptoEngine.encryptStringE2EE(fileAesKeyB64, sharedSecret)
-                    wireCipherText = encryptedKeyData.cipherTextBase64 // This is the encrypted AES key on the wire
-                    wireIv = encryptedKeyData.ivBase64
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-    
-    // Local copy of the encrypted AES key
-    val localEncryptedKeyData = CryptoEngine.encryptString(fileAesKeyB64)
-    localCipherText = localEncryptedKeyData.cipherTextBase64
-    localIv = localEncryptedKeyData.ivBase64
-
-    // The message payload contains the download URL and the file's IV in the mediaBase64OrUri field
-    // format: [downloadUrl]|[fileIvBase64]|[fileName]|[mimeType]
-    val mediaPayload = "$downloadUrl|${encryptedFile.ivBase64}|$fileName|$mimeType"
-
-    val msg = MessageEntity(
-      conversationId = conversationId,
-      senderId = currentUserId,
-      senderName = senderName,
-      isOutgoing = true,
-      cipherText = localCipherText, // the local encrypted fileAesKey
-      iv = localIv,
-      encryptionAlgorithm = algo,
-      messageType = MessageType.IMAGE.name, // or FILE
-      mediaBase64OrUri = mediaPayload,
-      timestamp = now,
-      status = MessageStatus.SENT.name
-    )
-    messageDao.insert(msg)
-
-    // Update conversation snippet
-    conversationDao.getConversationSync(conversationId)?.let { c ->
-      conversationDao.update(
-        c.copy(
-          lastEncryptedMessage = "📎 Encrypted Attachment",
-          lastMessageTimestamp = now
-        )
+      val msg = MessageEntity(
+        conversationId = conversationId, senderId = currentUserId, senderName = senderName,
+        isOutgoing = true, cipherText = localEncryptedKeyData.cipherTextBase64, iv = localEncryptedKeyData.ivBase64,
+        encryptionAlgorithm = "AES-256-GCM / X25519", messageType = MessageType.IMAGE.name,
+        mediaBase64OrUri = mediaPayload, timestamp = now, status = MessageStatus.SENT.name
       )
-    }
+      messageDao.insert(msg)
+      conversationDao.update(conv.copy(lastEncryptedMessage = "📎 Encrypted Attachment", lastMessageTimestamp = now))
 
-    // 5. Send the encrypted AES key and mediaPayload alongside the message to Firestore
-    try {
       val chatRef = firestore.collection("chats").document(conversationId)
-      chatRef.set(mapOf("participants" to listOf(currentUserId, conv?.contactEmail ?: ""))).await()
-      
-      val messageMap = mutableMapOf<String, Any>(
-        "senderId" to currentUserId,
-        "timestamp" to now,
-        "messageType" to MessageType.IMAGE.name,
-        "mediaPayload" to mediaPayload // The download URL and file IV
-      )
-      if (wireCipherText.isNotEmpty()) {
-          messageMap["cipherText"] = wireCipherText // The encrypted fileAesKey
-          messageMap["iv"] = wireIv
-      }
-      
-      chatRef.collection("messages").add(messageMap).await()
+      chatRef.set(mapOf("participants" to listOf(currentUserId, conv.contactUid))).await()
+      chatRef.collection("messages").add(mapOf(
+        "senderId" to currentUserId, "timestamp" to now, "messageType" to MessageType.IMAGE.name,
+        "cipherText" to encryptedKeyData.cipherTextBase64, "iv" to encryptedKeyData.ivBase64,
+        "mediaPayload" to mediaPayload
+      )).await()
+      NotificationClient.send(context, conv.contactUid, "message", senderName, "chat", conversationId)
+      SendMessageResult.Success
     } catch (e: Exception) {
-      e.printStackTrace()
+      Log.e("SecureRepository", "Failed to send encrypted attachment", e)
+      SendMessageResult.Failure(e.message ?: "Attachment send failed")
     }
   }
 
@@ -318,84 +360,37 @@ class SecureRepository(private val context: Context) {
     conversationId: String,
     text: String,
     senderName: String = "You (Verified)"
-  ) = withContext(Dispatchers.IO) {
-    val now = System.currentTimeMillis()
-    val currentUserId = try { auth.currentUser?.email ?: "me" } catch (e: Exception) { "me" }
-
-    var wireCipherText = ""
-    var wireIv = ""
-    var localCipherText = ""
-    var localIv = ""
-    var algo = "AES-256-GCM"
-
+  ): SendMessageResult = withContext(Dispatchers.IO) {
+    val currentUserId = auth.currentUser?.uid ?: return@withContext SendMessageResult.Failure("Not signed in")
     val conv = conversationDao.getConversationSync(conversationId)
-    if (conv != null) {
-        try {
-            val userDoc = firestore.collection("users").document(conv.contactEmail).get().await()
-            val recipientPubB64 = userDoc.getString("publicKey")
-            if (recipientPubB64 != null) {
-                val myPriv = getMyPrivateKey()
-                if (myPriv != null) {
-                    val recipientPub = CryptoEngine.decodePublicKey(recipientPubB64)
-                    val sharedSecret = CryptoEngine.deriveSharedSecret(myPriv, recipientPub)
-                    val encrypted = CryptoEngine.encryptStringE2EE(text, sharedSecret)
-                    wireCipherText = encrypted.cipherTextBase64
-                    wireIv = encrypted.ivBase64
-                    algo = encrypted.algorithm
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-    
-    val localEncrypted = CryptoEngine.encryptString(text)
-    localCipherText = localEncrypted.cipherTextBase64
-    localIv = localEncrypted.ivBase64
+      ?: return@withContext SendMessageResult.Failure("Conversation not found")
+    val sharedSecret = resolveRecipientSharedSecret(conv.contactUid)
+      ?: return@withContext SendMessageResult.Failure("can't send yet — waiting for the other person's key to sync")
 
-    val msg = MessageEntity(
-      conversationId = conversationId,
-      senderId = currentUserId,
-      senderName = senderName,
-      isOutgoing = true,
-      cipherText = localCipherText,
-      iv = localIv,
-      encryptionAlgorithm = algo,
-      messageType = MessageType.TEXT.name,
-      timestamp = now,
-      status = MessageStatus.SENT.name
-    )
-    messageDao.insert(msg)
+    val now = System.currentTimeMillis()
+    return@withContext try {
+      val encrypted = CryptoEngine.encryptStringE2EE(text, sharedSecret)
+      val localEncrypted = CryptoEngine.encryptString(text)
+      messageDao.insert(MessageEntity(
+        conversationId = conversationId, senderId = currentUserId, senderName = senderName,
+        isOutgoing = true, cipherText = localEncrypted.cipherTextBase64, iv = localEncrypted.ivBase64,
+        encryptionAlgorithm = encrypted.algorithm, messageType = MessageType.TEXT.name,
+        timestamp = now, status = MessageStatus.SENT.name
+      ))
+      conversationDao.update(conv.copy(lastEncryptedMessage = "🔒 E2EE: $text", lastMessageTimestamp = now))
 
-    // Update conversation snippet
-    conversationDao.getConversationSync(conversationId)?.let { conv ->
-      conversationDao.update(
-        conv.copy(
-          lastEncryptedMessage = "🔒 E2EE: $text",
-          lastMessageTimestamp = now
-        )
-      )
-      
-      try {
-        val chatRef = firestore.collection("chats").document(conversationId)
-        chatRef.set(mapOf("participants" to listOf(currentUserId, conv.contactEmail))).await()
-        
-        val messageMap = mutableMapOf<String, Any>(
-          "senderId" to currentUserId,
-          "timestamp" to now,
-          "messageType" to MessageType.TEXT.name
-        )
-        if (wireCipherText.isNotEmpty()) {
-            messageMap["cipherText"] = wireCipherText
-            messageMap["iv"] = wireIv
-        } else {
-            messageMap["text"] = text // Fallback to plaintext if E2EE not established
-        }
-        
-        chatRef.collection("messages").add(messageMap).await()
-      } catch (e: Exception) {
-        Log.e("SecureRepository", "Failed to send to Firestore", e)
-      }
+      val chatRef = firestore.collection("chats").document(conversationId)
+      chatRef.set(mapOf("participants" to listOf(currentUserId, conv.contactUid))).await()
+      chatRef.collection("messages").add(mapOf(
+        "senderId" to currentUserId, "timestamp" to now, "messageType" to MessageType.TEXT.name,
+        "cipherText" to encrypted.cipherTextBase64, "iv" to encrypted.ivBase64,
+        "encryptionAlgorithm" to encrypted.algorithm
+      )).await()
+      NotificationClient.send(context, conv.contactUid, "message", senderName, "chat", conversationId)
+      SendMessageResult.Success
+    } catch (e: Exception) {
+      Log.e("SecureRepository", "Failed to send encrypted text", e)
+      SendMessageResult.Failure(e.message ?: "Message send failed")
     }
   }
 
@@ -538,7 +533,8 @@ class SecureRepository(private val context: Context) {
       val c1 = ConversationEntity(
         id = "contact_elena",
         contactName = "Elena Rostova",
-        contactEmail = "elena.rostova@cybersec.labs",
+        contactUid = "seed_elena",
+        contactUsername = "elena",
         avatarSeed = "Elena",
         lastEncryptedMessage = "🔒 E2EE: Key exchange complete. Channel authenticated.",
         lastMessageTimestamp = System.currentTimeMillis() - 1000 * 60 * 12,
@@ -552,7 +548,8 @@ class SecureRepository(private val context: Context) {
       val c2 = ConversationEntity(
         id = "contact_marcus",
         contactName = "Dr. Marcus Vance",
-        contactEmail = "m.vance@quantum-defense.org",
+        contactUid = "seed_marcus",
+        contactUsername = "marcus",
         avatarSeed = "Marcus",
         lastEncryptedMessage = "📞 Voice Call (04:18) • Encrypted",
         lastMessageTimestamp = System.currentTimeMillis() - 1000 * 60 * 65,
@@ -566,7 +563,8 @@ class SecureRepository(private val context: Context) {
       val c3 = ConversationEntity(
         id = "contact_sarah",
         contactName = "Sarah Connor",
-        contactEmail = "sarah.connor@tactical.net",
+        contactUid = "seed_sarah",
+        contactUsername = "sarah",
         avatarSeed = "Sarah",
         lastEncryptedMessage = "📹 🔒 Encrypted Video • Verified",
         lastMessageTimestamp = System.currentTimeMillis() - 1000 * 60 * 340,

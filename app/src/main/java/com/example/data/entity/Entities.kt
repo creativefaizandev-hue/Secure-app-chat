@@ -7,7 +7,8 @@ import androidx.room.PrimaryKey
 data class ConversationEntity(
   @PrimaryKey val id: String,
   val contactName: String,
-  val contactEmail: String,
+  val contactUid: String,
+  val contactUsername: String,
   val avatarSeed: String,
   val lastEncryptedMessage: String,
   val lastMessageTimestamp: Long,

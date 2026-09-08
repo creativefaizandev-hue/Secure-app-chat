@@ -20,7 +20,10 @@ import com.example.data.entity.UserProfileEntity
     CallLogEntity::class,
     UserProfileEntity::class
   ],
-  version = 1,
+  // v2: the conversation contact identity fields changed to UID + username. Existing local
+  // conversation rows cannot be losslessly mapped from email, so the existing
+  // fallbackToDestructiveMigration policy is intentionally used for this schema change.
+  version = 2,
   exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

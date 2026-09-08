@@ -18,6 +18,8 @@ import kotlinx.coroutines.tasks.await
 data class AuthUserState(
   val isAuthenticated: Boolean = false,
   val email: String = "",
+  val username: String? = null,
+  val identityResolved: Boolean = false,
   val displayName: String = "",
   val photoUrl: String? = null,
   val authProvider: String = "Not Signed In",
@@ -47,8 +49,12 @@ class GoogleAuthManager(
           keyFingerprint = CryptoEngine.computeKeyFingerprint(user.email ?: user.uid),
           isHardwareKeystoreBound = true
         )
-        _authState.value = state
-        repository.startFirestoreSync()
+        _authState.value = state.copy(identityResolved = false)
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main.immediate).launch {
+          val username = repository.getUsername(user.uid)
+          _authState.value = state.copy(username = username, identityResolved = true)
+          if (username != null) repository.startFirestoreSync()
+        }
       }
     } catch (e: Exception) {
       // Firebase not initialized yet
@@ -89,10 +95,11 @@ class GoogleAuthManager(
             keyFingerprint = CryptoEngine.computeKeyFingerprint(firebaseUser.email ?: firebaseUser.uid),
             isHardwareKeystoreBound = true
           )
-          _authState.value = user
           saveProfile(user)
-          repository.startFirestoreSync()
-          Result.success(user)
+          val username = repository.getUsername(firebaseUser.uid)
+          _authState.value = user.copy(username = username, identityResolved = true)
+          if (username != null) repository.startFirestoreSync()
+          Result.success(user.copy(username = username, identityResolved = true))
         } else {
           Result.failure(Exception("Firebase Auth returned null user"))
         }
@@ -105,8 +112,25 @@ class GoogleAuthManager(
   }
 
   suspend fun switchGoogleAccount(newEmail: String, newName: String) {
-      // Stubbed out for real implementation. In a real app, we'd sign out and prompt for creds again.
+      // Google account switching remains a sign-out + fresh credential flow.
       signOut()
+  }
+
+  suspend fun chooseUsername(username: String): Result<String> {
+      val result = repository.setUsername(username)
+      result.onSuccess { chosen ->
+          _authState.value = _authState.value.copy(username = chosen, identityResolved = true)
+          repository.startFirestoreSync()
+      }
+      return result
+  }
+
+  suspend fun changeUsername(username: String): Result<String> {
+      val result = repository.changeUsername(username)
+      result.onSuccess { chosen ->
+          _authState.value = _authState.value.copy(username = chosen, identityResolved = true)
+      }
+      return result
   }
 
   fun signOut() {
@@ -118,6 +142,8 @@ class GoogleAuthManager(
     _authState.value = AuthUserState(
       isAuthenticated = false,
       email = "",
+      username = null,
+      identityResolved = true,
       displayName = "",
       photoUrl = null,
       authProvider = "Not Signed In",

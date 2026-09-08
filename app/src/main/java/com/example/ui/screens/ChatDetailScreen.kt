@@ -137,13 +137,17 @@ fun ChatDetailScreen(
           val bytes = context.contentResolver.openInputStream(selectedUri)?.use { it.readBytes() }
           if (bytes != null) {
             Toast.makeText(context, "Encrypting with AES-256...", Toast.LENGTH_SHORT).show()
-            repository.sendEncryptedAttachmentMessage(
+            when (val result = repository.sendEncryptedAttachmentMessage(
               conversationId = conversationId,
               fileBytes = bytes,
               fileName = "photo_${System.currentTimeMillis()}.jpg",
               mimeType = "image/jpeg"
-            )
-            Toast.makeText(context, "Encrypted photo sent to Storage", Toast.LENGTH_SHORT).show()
+            )) {
+              is SecureRepository.SendMessageResult.Success ->
+                Toast.makeText(context, "Encrypted photo sent to Storage", Toast.LENGTH_SHORT).show()
+              is SecureRepository.SendMessageResult.Failure ->
+                Toast.makeText(context, result.reason, Toast.LENGTH_LONG).show()
+            }
           }
         } catch (e: Exception) {
           Toast.makeText(context, "Attachment failed: ${e.message}", Toast.LENGTH_LONG).show()
@@ -461,7 +465,11 @@ fun ChatDetailScreen(
                 val msgToSend = textInput.trim()
                 textInput = ""
                 scope.launch {
-                  repository.sendEncryptedTextMessage(conversationId, msgToSend)
+                  when (val result = repository.sendEncryptedTextMessage(conversationId, msgToSend)) {
+                    is SecureRepository.SendMessageResult.Success -> Unit
+                    is SecureRepository.SendMessageResult.Failure ->
+                      Toast.makeText(context, result.reason, Toast.LENGTH_LONG).show()
+                  }
                 }
               },
               containerColor = CyberEmerald,
@@ -567,13 +575,17 @@ fun ChatDetailScreen(
                   scope.launch {
                     val demoPhotoBytes = "Simulated encrypted camera sensor raw payload with biometric watermark".toByteArray(Charsets.UTF_8)
                     Toast.makeText(context, "Encrypting & uploading to Firebase Storage...", Toast.LENGTH_SHORT).show()
-                    repository.sendEncryptedAttachmentMessage(
+                    when (val result = repository.sendEncryptedAttachmentMessage(
                       conversationId = conversationId,
                       fileBytes = demoPhotoBytes,
                       fileName = "demo_secure_capture.jpg",
                       mimeType = "image/jpeg"
-                    )
-                    Toast.makeText(context, "Encrypted attachment sent successfully", Toast.LENGTH_SHORT).show()
+                    )) {
+                      is SecureRepository.SendMessageResult.Success ->
+                        Toast.makeText(context, "Encrypted attachment sent successfully", Toast.LENGTH_SHORT).show()
+                      is SecureRepository.SendMessageResult.Failure ->
+                        Toast.makeText(context, result.reason, Toast.LENGTH_LONG).show()
+                    }
                   }
                 }
             ) {

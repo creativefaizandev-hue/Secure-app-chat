@@ -32,18 +32,6 @@ android {
       keyPassword = System.getenv("KEY_PASSWORD")
     }
     create("debugConfig") {
-      // debug.keystore is intentionally gitignored (throwaway debug signing key).
-      // It must exist BEFORE Gradle runs — Gradle 9's configuration cache does
-      // not allow starting external processes (like keytool) at configuration
-      // time. Generate it in your shell / CI step before calling ./gradlew:
-      //
-      //   keytool -genkeypair -keystore debug.keystore \
-      //     -storepass android -keypass android -alias androiddebugkey \
-      //     -keyalg RSA -keysize 2048 -validity 10000 \
-      //     -dname "CN=Android Debug,O=Android,C=US"
-      //
-      // (The GitHub Actions workflow already does this in its
-      // "Ensure debug keystore exists" step, before "Build debug APK" runs.)
       storeFile = file("${rootDir}/debug.keystore")
       storePassword = "android"
       keyAlias = "androiddebugkey"
@@ -75,12 +63,20 @@ android {
   }
 }
 
-// Configure the Secrets Gradle Plugin to use .env and .env.example files
+// Configure the Secrets Gradle Plugin to use .env and .env.example files.
+// The plugin injects each property directly into generated BuildConfig, so
+// GOOGLE_WEB_CLIENT_ID and NOTIFICATION_WORKER_URL are available without a
+// second buildConfigField declaration (which would duplicate the fields).
 // to match the convention used in Web projects.
 secrets {
   propertiesFileName = ".env"
   defaultPropertiesFileName = ".env.example"
   ignoreList.add("FIREBASE_APPCHECK_DEBUG_TOKEN")
+  // Never allow backend credentials to become generated BuildConfig fields by accident.
+  ignoreList.add("FIREBASE_SERVICE_ACCOUNT_JSON")
+  ignoreList.add("FIREBASE_PRIVATE_KEY")
+  ignoreList.add("FCM_SERVER_KEY")
+  ignoreList.add("APP_SHARED_SECRET")
 }
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }

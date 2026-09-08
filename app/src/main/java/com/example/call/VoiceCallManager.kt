@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.AudioManager
 import android.util.Log
 import com.example.crypto.CryptoEngine
+import com.example.notifications.NotificationClient
 import com.example.data.model.CallDirection
 import com.example.data.repository.SecureRepository
 import com.google.firebase.auth.FirebaseAuth
@@ -54,21 +55,22 @@ class VoiceCallManager(
   private val auth by lazy { FirebaseAuth.getInstance() }
   
   private var currentRoomId: String? = null
+  private var currentCallIsCaller = false
   
   fun listenForIncomingCalls() {
-      val myEmail = try { auth.currentUser?.email ?: return } catch(e:Exception){ return }
-      firestore.collection("calls").addSnapshotListener { snapshot, _ ->
+      val myUid = try { auth.currentUser?.uid ?: return } catch(e:Exception){ return }
+      firestore.collection("calls").whereArrayContains("participants", myUid).addSnapshotListener { snapshot, _ ->
           snapshot?.documentChanges?.forEach { change ->
               val docId = change.document.id
-              if (docId.endsWith("_$myEmail")) {
-                  val offer = change.document.get("offer") as? Map<String, String>
-                  val answer = change.document.get("answer")
-                  // Only trigger if there is an offer but no answer yet
-                  if (offer != null && answer == null) {
-                      val callerId = docId.substringBefore("_")
-                      // Attempt to resolve name & fingerprint from local db? For now just use email.
-                      triggerIncomingCall(callerId, callerId.substringBefore("@"), "E2EE-WebRTC-Call", docId)
-                  }
+              val participants = change.document.get("participants") as? List<*> ?: return@forEach
+              if (!participants.contains(myUid)) return@forEach
+              val offer = change.document.get("offer") as? Map<*, *>
+              val answer = change.document.get("answer")
+              // Only trigger an unanswered offer where another authenticated participant is the caller.
+              if (offer != null && answer == null) {
+                  val callerId = change.document.getString("callerUid") ?: return@forEach
+                  if (callerId == myUid) return@forEach
+                  triggerIncomingCall(callerId, callerId.take(8), "E2EE-WebRTC-Call", docId)
               }
           }
       }
@@ -87,8 +89,8 @@ class VoiceCallManager(
           candidate?.let {
               scope.launch(Dispatchers.IO) {
                   currentRoomId?.let { roomId ->
-                      val currentUserId = try { auth.currentUser?.email ?: return@launch } catch(e:Exception){ return@launch }
-                      val role = if (roomId.startsWith(currentUserId)) "caller" else "callee"
+                      val currentUserId = try { auth.currentUser?.uid ?: return@launch } catch(e:Exception){ return@launch }
+                      val role = if (currentCallIsCaller) "caller" else "callee"
                       val candMap = mapOf(
                           "sdpMid" to it.sdpMid,
                           "sdpMLineIndex" to it.sdpMLineIndex,
@@ -114,8 +116,9 @@ class VoiceCallManager(
     callJob?.cancel()
     _callState.value = CallState.Dialing(contactId, contactName, fingerprint)
     
-    val myEmail = try { auth.currentUser?.email ?: return } catch(e:Exception){ return }
-    currentRoomId = "${myEmail}_$contactId"
+    val myUid = try { auth.currentUser?.uid ?: return } catch(e:Exception){ return }
+    currentRoomId = "${myUid}_$contactId"
+    currentCallIsCaller = true
     
     scope.launch(Dispatchers.IO) {
         if (eglBase != null) {
@@ -124,7 +127,8 @@ class VoiceCallManager(
                 scope.launch(Dispatchers.IO) {
                     val offerMap = mapOf("type" to desc.type.canonicalForm(), "sdp" to desc.description)
                     try {
-                        firestore.collection("calls").document(currentRoomId!!).set(mapOf("offer" to offerMap))
+                        firestore.collection("calls").document(currentRoomId!!).set(mapOf("participants" to listOf(myUid, contactId), "callerUid" to myUid, "offer" to offerMap))
+                        NotificationClient.send(context, contactId, "call", contactName, "call", currentRoomId!!)
                         listenForAnswer(currentRoomId!!)
                         listenForCandidates(currentRoomId!!, "callee")
                     } catch(e: Exception) { }
@@ -140,6 +144,7 @@ class VoiceCallManager(
   fun triggerIncomingCall(contactId: String, contactName: String, fingerprint: String, offerId: String = "") {
     callJob?.cancel()
     currentRoomId = offerId
+    currentCallIsCaller = false
     _callState.value = CallState.Incoming(contactId, contactName, fingerprint, offerId)
   }
 

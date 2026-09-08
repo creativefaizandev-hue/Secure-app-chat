@@ -198,12 +198,13 @@ fun ChatsTab(
   val conversations by repository.conversations.collectAsState(initial = emptyList())
   var searchQuery by remember { mutableStateOf("") }
   var showNewChatDialog by remember { mutableStateOf(false) }
+  var newUsername by remember { mutableStateOf("") }
   val scope = rememberCoroutineScope()
   val context = LocalContext.current
 
   val filteredConversations = conversations.filter {
     it.contactName.contains(searchQuery, ignoreCase = true) ||
-      it.contactEmail.contains(searchQuery, ignoreCase = true)
+      it.contactUsername.contains(searchQuery, ignoreCase = true)
   }
 
   Column(
@@ -342,85 +343,50 @@ fun ChatsTab(
   }
 
   if (showNewChatDialog) {
-    var newName by remember { mutableStateOf("") }
-    var newEmail by remember { mutableStateOf("") }
-
     AlertDialog(
       onDismissRequest = { showNewChatDialog = false },
       containerColor = CardSurfaceDark,
-      title = {
-        Text("Start New Encrypted Session", color = TextPrimaryDark, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-      },
+      title = { Text("Add encrypted contact", color = TextPrimaryDark, fontWeight = FontWeight.Bold) },
       text = {
         Column {
-          Text("Exchange ECDH keys with another user to create an end-to-end encrypted channel.", color = TextSecondaryDark, fontSize = 12.sp)
-          Spacer(modifier = Modifier.height(12.dp))
+          Text("Enter their unique username. No email lookup is used.", color = TextSecondaryDark, fontSize = 12.sp)
+          Spacer(modifier = Modifier.height(10.dp))
           OutlinedTextField(
-            value = newName,
-            onValueChange = { newName = it },
-            label = { Text("Contact Name") },
+            value = newUsername,
+            onValueChange = { if (it.length <= 20) newUsername = it.filter { c -> c.isLetterOrDigit() || c == '_' } },
+            label = { Text("Username") },
+            singleLine = true,
             colors = OutlinedTextFieldDefaults.colors(
-              focusedContainerColor = CardSurfaceElevated,
-              unfocusedContainerColor = CardSurfaceElevated,
-              focusedTextColor = TextPrimaryDark,
-              unfocusedTextColor = TextPrimaryDark
+              focusedContainerColor = CardSurfaceElevated, unfocusedContainerColor = CardSurfaceElevated,
+              focusedTextColor = TextPrimaryDark, unfocusedTextColor = TextPrimaryDark
             ),
-            modifier = Modifier.fillMaxWidth().testTag("new_contact_name")
-          )
-          Spacer(modifier = Modifier.height(8.dp))
-          OutlinedTextField(
-            value = newEmail,
-            onValueChange = { newEmail = it },
-            label = { Text("Google Account / Email") },
-            colors = OutlinedTextFieldDefaults.colors(
-              focusedContainerColor = CardSurfaceElevated,
-              unfocusedContainerColor = CardSurfaceElevated,
-              focusedTextColor = TextPrimaryDark,
-              unfocusedTextColor = TextPrimaryDark
-            ),
-            modifier = Modifier.fillMaxWidth().testTag("new_contact_email")
+            modifier = Modifier.fillMaxWidth().testTag("new_contact_username")
           )
         }
       },
       confirmButton = {
         Button(
           onClick = {
-            if (newName.isNotBlank()) {
-              val contactId = "contact_${System.currentTimeMillis()}"
-              val safety = CryptoEngine.generateSafetyNumber("me", contactId)
-              val fingerprint = CryptoEngine.computeKeyFingerprint(newEmail.ifBlank { newName })
-              val newConv = ConversationEntity(
-                id = contactId,
-                contactName = newName.trim(),
-                contactEmail = newEmail.trim().ifBlank { "${newName.lowercase().replace(" ", "")}@gmail.com" },
-                avatarSeed = newName,
-                lastEncryptedMessage = "🔒 E2EE Session Initialized",
-                lastMessageTimestamp = System.currentTimeMillis(),
-                unreadCount = 0,
-                safetyNumber = safety,
-                isVerified = false,
-                e2eeFingerprint = fingerprint,
-                isOnline = true
-              )
-              scope.launch {
-                repository.insertConversation(newConv)
-                repository.sendEncryptedTextMessage(contactId, "End-to-End Encrypted Session Initialized.")
-                Toast.makeText(context, "Encrypted channel established with $newName", Toast.LENGTH_SHORT).show()
-              }
-              showNewChatDialog = false
+            scope.launch {
+              val result = repository.createConversationWithUsername(newUsername, "Contact")
+              result.onSuccess { conversation ->
+                val sendResult = repository.sendEncryptedTextMessage(conversation.id, "End-to-End Encrypted Session Initialized.")
+                if (sendResult is SecureRepository.SendMessageResult.Success) {
+                  Toast.makeText(context, "Encrypted channel established", Toast.LENGTH_SHORT).show()
+                } else if (sendResult is SecureRepository.SendMessageResult.Failure) {
+                  Toast.makeText(context, sendResult.reason, Toast.LENGTH_LONG).show()
+                }
+                newUsername = ""
+                showNewChatDialog = false
+              }.onFailure { error -> Toast.makeText(context, error.message ?: "Could not add contact", Toast.LENGTH_LONG).show() }
             }
           },
+          enabled = newUsername.length in 3..20,
           colors = ButtonDefaults.buttonColors(containerColor = CyberEmerald),
           modifier = Modifier.testTag("confirm_new_contact")
-        ) {
-          Text("Connect", color = ObsidianBackground, fontWeight = FontWeight.Bold)
-        }
+        ) { Text("Connect", color = ObsidianBackground, fontWeight = FontWeight.Bold) }
       },
-      dismissButton = {
-        TextButton(onClick = { showNewChatDialog = false }) {
-          Text("Cancel", color = TextSecondaryDark)
-        }
-      }
+      dismissButton = { TextButton(onClick = { showNewChatDialog = false }) { Text("Cancel", color = TextSecondaryDark) } }
     )
   }
 }
@@ -887,6 +853,7 @@ fun AccountTab(
   val scope = rememberCoroutineScope()
   val context = LocalContext.current
   var showSwitchDialog by remember { mutableStateOf(false) }
+  var showUsernameDialog by remember { mutableStateOf(false) }
 
   Column(
     modifier = Modifier
@@ -928,12 +895,8 @@ fun AccountTab(
           fontWeight = FontWeight.Bold,
           color = TextPrimaryDark
         )
-        Text(
-          text = authState.email,
-          fontSize = 13.sp,
-          color = CyberEmerald,
-          fontFamily = FontFamily.Monospace
-        )
+        Text("@${authState.username ?: "not set"}", fontSize = 13.sp, color = CyberEmerald, fontFamily = FontFamily.Monospace)
+        Text(authState.email, fontSize = 11.sp, color = TextMutedDark, fontFamily = FontFamily.Monospace)
 
         Spacer(modifier = Modifier.height(12.dp))
 
@@ -983,6 +946,18 @@ fun AccountTab(
 
     Spacer(modifier = Modifier.height(20.dp))
 
+    OutlinedButton(
+      onClick = { showUsernameDialog = true },
+      colors = ButtonDefaults.outlinedButtonColors(contentColor = EncryptionCyan),
+      border = androidx.compose.foundation.BorderStroke(1.dp, EncryptionCyan.copy(alpha = 0.6f)),
+      modifier = Modifier.fillMaxWidth().testTag("edit_username_button")
+    ) {
+      Icon(Icons.Default.Person, contentDescription = null, tint = EncryptionCyan)
+      Spacer(modifier = Modifier.width(8.dp))
+      Text("Change Username")
+    }
+    Spacer(modifier = Modifier.height(10.dp))
+
     // Sign in / Switch account button
     Button(
       onClick = {
@@ -1015,6 +990,38 @@ fun AccountTab(
       Spacer(modifier = Modifier.width(8.dp))
       Text("Switch Google Account")
     }
+  }
+
+  if (showUsernameDialog) {
+    var usernameInput by remember(authState.username) { mutableStateOf(authState.username ?: "") }
+    AlertDialog(
+      onDismissRequest = { showUsernameDialog = false },
+      containerColor = CardSurfaceDark,
+      title = { Text(if (authState.username == null) "Choose a username" else "Change username", color = TextPrimaryDark, fontWeight = FontWeight.Bold) },
+      text = {
+        Column {
+          Text("3-20 characters: letters, numbers, underscore.", color = TextSecondaryDark, fontSize = 12.sp)
+          Spacer(modifier = Modifier.height(8.dp))
+          OutlinedTextField(
+            value = usernameInput,
+            onValueChange = { if (it.length <= 20) usernameInput = it.filter { c -> c.isLetterOrDigit() || c == '_' } },
+            label = { Text("Username") },
+            singleLine = true
+          )
+        }
+      },
+      confirmButton = {
+        Button(onClick = {
+          scope.launch {
+            val result = if (authState.username == null) authManager.chooseUsername(usernameInput) else authManager.changeUsername(usernameInput)
+            result.onSuccess { showUsernameDialog = false; Toast.makeText(context, "Username saved as @$it", Toast.LENGTH_SHORT).show() }
+              .onFailure { Toast.makeText(context, it.message ?: "Username could not be saved", Toast.LENGTH_LONG).show() }
+          }
+        }, enabled = usernameInput.matches(Regex("^[A-Za-z0-9_]{3,20}$")), colors = ButtonDefaults.buttonColors(containerColor = CyberEmerald)) {
+          Text("Save", color = ObsidianBackground, fontWeight = FontWeight.Bold)
+        } },
+      dismissButton = { TextButton(onClick = { showUsernameDialog = false }) { Text("Cancel") } }
+    )
   }
 
   if (showSwitchDialog) {

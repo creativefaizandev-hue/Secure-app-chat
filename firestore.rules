@@ -1,0 +1,65 @@
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isParticipant(chatId) {
+      return signedIn() && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
+    }
+    function isCallParticipant(callId) {
+      return signedIn() && request.auth.uid in get(/databases/$(database)/documents/calls/$(callId)).data.participants;
+    }
+    function validUsername(value) {
+      return value is string && value.size() >= 3 && value.size() <= 20 && value.matches('^[A-Za-z0-9_]+$');
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow create, update, delete: if signedIn() && request.auth.uid == uid;
+    }
+
+    match /usernames/{username} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && validUsername(username)
+        && !exists(/databases/$(database)/documents/usernames/$(username))
+        && request.resource.data.uid == request.auth.uid;
+      allow update: if false;
+      allow delete: if signedIn() && resource.data.uid == request.auth.uid;
+    }
+
+    match /userNotificationTokens/{uid} {
+      allow read, create, update, delete: if signedIn() && request.auth.uid == uid;
+    }
+
+    match /chats/{chatId} {
+      allow read: if signedIn() && request.auth.uid in resource.data.participants;
+      allow update, delete: if signedIn()
+        && request.auth.uid in resource.data.participants
+        && request.resource.data.participants == resource.data.participants;
+      allow create: if signedIn()
+        && request.auth.uid in request.resource.data.participants
+        && request.resource.data.participants is list
+        && request.resource.data.participants.size() == 2;
+
+      match /messages/{messageId} {
+        allow read, create, update, delete: if isParticipant(chatId);
+      }
+    }
+
+    match /calls/{callId} {
+      allow read: if signedIn() && request.auth.uid in resource.data.participants;
+      allow update, delete: if signedIn()
+        && request.auth.uid in resource.data.participants
+        && request.resource.data.participants == resource.data.participants;
+      allow create: if signedIn()
+        && request.auth.uid in request.resource.data.participants
+        && request.resource.data.participants is list
+        && request.resource.data.participants.size() == 2;
+
+      match /candidates/{candidateId} {
+        allow read, create, update, delete: if isCallParticipant(callId);
+      }
+    }
+  }
+}

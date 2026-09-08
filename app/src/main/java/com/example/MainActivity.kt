@@ -26,6 +26,7 @@ import com.example.data.repository.SecureRepository
 import com.example.ui.components.IncomingCallDialog
 import com.example.ui.screens.ChatDetailScreen
 import com.example.ui.screens.MainHomeScreen
+import com.example.ui.screens.UsernameSetupScreen
 import com.example.ui.screens.VoiceCallScreen
 import com.example.ui.theme.MyApplicationTheme
 
@@ -39,11 +40,13 @@ class MainActivity : ComponentActivity() {
         val repository = remember { SecureRepository(context) }
         val authManager = remember { GoogleAuthManager(context, repository) }
         val callManager = remember { VoiceCallManager(context, repository) }
-        androidx.compose.runtime.LaunchedEffect(Unit) {
-            callManager.listenForIncomingCalls()
+        val authState by authManager.authState.collectAsState()
+        androidx.compose.runtime.LaunchedEffect(authState.isAuthenticated) {
+            if (authState.isAuthenticated) callManager.listenForIncomingCalls()
         }
 
         val callState by callManager.callState.collectAsState()
+        val uiScope = androidx.compose.runtime.rememberCoroutineScope()
         var activeConversationId by remember { mutableStateOf<String?>(null) }
 
         Box(modifier = Modifier.fillMaxSize()) {
@@ -56,6 +59,18 @@ class MainActivity : ComponentActivity() {
               onEndCall = { callManager.endCall() },
               onVerificationToggled = { _, _ -> }
             )
+          } else if (!authState.isAuthenticated) {
+            com.example.ui.screens.SignInRequiredScreen(
+              onSignIn = {
+                uiScope.launch {
+                  authManager.signInWithGoogle(BuildConfig.GOOGLE_WEB_CLIENT_ID)
+                }
+              }
+            )
+          } else if (!authState.identityResolved) {
+            androidx.compose.material3.CircularProgressIndicator()
+          } else if (authState.username == null) {
+            UsernameSetupScreen(authManager = authManager)
           } else {
             AnimatedContent(
               targetState = activeConversationId,
