@@ -278,7 +278,7 @@ class SecureRepository(private val context: Context) {
                   conversationDao.getConversationSync(chatId)?.let { conv ->
                     conversationDao.update(
                       conv.copy(
-                        lastEncryptedMessage = "🔒 E2EE: $text",
+                        lastEncryptedMessage = "🔒 E2EE: $decryptedText",
                         lastMessageTimestamp = timestamp,
                         unreadCount = conv.unreadCount + 1
                       )

@@ -1,4 +1,23 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import java.io.FileInputStream
+import java.util.Properties
+
+// Reads .env (falling back to .env.example) so GOOGLE_WEB_CLIENT_ID and
+// NOTIFICATION_WORKER_URL can be turned into real BuildConfig fields below.
+// This is done manually (rather than relying solely on the Secrets Gradle
+// Plugin) because the plugin's BuildConfig generation was not reliably
+// picking up these keys — this guarantees the fields always exist, even as
+// empty strings, so the app always compiles.
+val localEnvProperties = Properties().apply {
+  val envFile = rootProject.file(".env")
+  val envExampleFile = rootProject.file(".env.example")
+  if (envFile.exists()) {
+    load(FileInputStream(envFile))
+  } else if (envExampleFile.exists()) {
+    load(FileInputStream(envExampleFile))
+  }
+}
+fun envValue(key: String): String = localEnvProperties.getProperty(key, "")
 
 plugins {
   alias(libs.plugins.android.application)
@@ -21,6 +40,9 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    buildConfigField("String", "GOOGLE_WEB_CLIENT_ID", "\"${envValue("GOOGLE_WEB_CLIENT_ID")}\"")
+    buildConfigField("String", "NOTIFICATION_WORKER_URL", "\"${envValue("NOTIFICATION_WORKER_URL")}\"")
   }
 
   signingConfigs {
@@ -64,10 +86,11 @@ android {
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files.
-// The plugin injects each property directly into generated BuildConfig, so
-// GOOGLE_WEB_CLIENT_ID and NOTIFICATION_WORKER_URL are available without a
-// second buildConfigField declaration (which would duplicate the fields).
-// to match the convention used in Web projects.
+// GOOGLE_WEB_CLIENT_ID and NOTIFICATION_WORKER_URL are read manually above
+// (see envValue()) into explicit buildConfigField entries, because relying
+// on this plugin alone to generate those BuildConfig fields proved
+// unreliable in CI. This plugin is kept for its manifest-placeholder
+// support and as a safety net for any other properties in .env.
 secrets {
   propertiesFileName = ".env"
   defaultPropertiesFileName = ".env.example"
