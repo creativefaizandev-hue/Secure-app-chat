@@ -36,6 +36,21 @@ jobs:
           fi
           chmod +x ./gradlew
 
+      # Writes .env from repository secrets, so app/build.gradle.kts can read
+      # GOOGLE_WEB_CLIENT_ID and NOTIFICATION_WORKER_URL into BuildConfig.
+      # Neither value is a backend secret — the OAuth Web Client ID and the
+      # Worker URL are both meant to be public/embedded in the app — but they
+      # still live in GitHub secrets so you don't have to edit code to change
+      # them, and so local .env (git-ignored) stays the source of truth when
+      # building outside CI.
+      - name: Write .env from repository secrets
+        env:
+          GOOGLE_WEB_CLIENT_ID: ${{ secrets.GOOGLE_WEB_CLIENT_ID }}
+          NOTIFICATION_WORKER_URL: ${{ secrets.NOTIFICATION_WORKER_URL }}
+        run: |
+          echo "GOOGLE_WEB_CLIENT_ID=${GOOGLE_WEB_CLIENT_ID}" > .env
+          echo "NOTIFICATION_WORKER_URL=${NOTIFICATION_WORKER_URL}" >> .env
+
       # If the repository secret GOOGLE_SERVICES_JSON is configured, write it.
       # This secret should contain the RAW JSON content of google-services.json
       # (not base64-encoded) — paste the file's contents directly as the
